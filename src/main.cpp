@@ -25,8 +25,8 @@ std::string load_api_token(const std::string& file_path) {
 
 // Function to send subscriptions to symbols
 void send_subscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws) {
-    std::string apple = "{\"type\":\"subscribe\",\"symbol\":\"AAPL\"}";
-    ws.write(net::buffer(str));
+    std::string appleSubscription = "{\"type\":\"subscribe\",\"symbol\":\"AAPL\"}";
+    ws.write(net::buffer(appleSubscription));
 }
 
 int main() {
