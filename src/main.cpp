@@ -3,6 +3,7 @@
 #include <boost/beast/websocket/ssl.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio.hpp>
+#include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <string>
@@ -13,6 +14,7 @@ namespace websocket = beast::websocket;
 namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
+using json = nlohmann::json;
 
 std::string load_api_token(const std::string& file_path) {
     YAML::Node config = YAML::LoadFile(file_path);
@@ -27,6 +29,31 @@ std::string load_api_token(const std::string& file_path) {
 void send_subscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws) {
     std::string appleSubscription = "{\"type\":\"subscribe\",\"symbol\":\"AAPL\"}";
     ws.write(net::buffer(appleSubscription));
+}
+
+
+void handle_message(const std::string& message) {
+    try {
+        json parsed = json::parse(message);
+
+        // Check if it's an error message or data message
+        if (parsed.contains("type")) {
+            std::string type = parsed["type"];
+            if (type == "error") {
+                std::cout << "Error: " << parsed["msg"] << std::endl;
+            } else if (type == "trade") {
+                auto trade_data = parsed["data"];
+                for (const auto& trade : trade_data) {
+                    std::string symbol = trade["s"];
+                    double price = trade["p"];
+                    int volume = trade["v"];
+                    std::cout << "Symbol: " << symbol << ", Price: " << price << ", Volume: " << volume << std::endl;
+                }
+            }
+        }
+    } catch (const json::parse_error& e) {
+        std::cerr << "JSON Parse Error: " << e.what() << std::endl;
+    }
 }
 
 int main() {
