@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 #include <deque>
+#include <unordered_map>
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
@@ -20,30 +21,48 @@ using json = nlohmann::json;
 #define PERIOD_MAX 100
 
 typedef struct PriceVolume {
-    std::string symbol;
     double price;
     double volume;
 
-    PriceVolume(std::string s, double p, double v) : symbol(s), price(p), volume(v) {};
+    PriceVolume(double p, double v) : price(p), volume(v) {};
 } PriceVolume;
 
-std::string load_api_token(const std::string& file_path) {
-    YAML::Node config = YAML::LoadFile(file_path);
+void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols){
+    YAML::Node config = YAML::LoadFile(filePath);
+
     if (config["api_token"]) {
-        return config["api_token"].as<std::string>();
+        token = config["api_token"].as<std::string>();
     } else {
         throw std::runtime_error("API token not found in the YAML file");
     }
+
+    if (config["symbols"]) {
+        for (const auto& item : config["symbols"]) {
+            symbols.push_back(item.as<std::string>());
+        }
+    } else {
+        throw std::runtime_error("Symbols array not found in YAML file");
+    }
 }
 
-// Function to send subscriptions to symbols
-void send_subscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws) {
-    std::string appleSubscription = "{\"type\":\"subscribe\",\"symbol\":\"AAPL\"}";
-    ws.write(net::buffer(appleSubscription));
+void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, std::vector<std::string> symbols) {
+    for (std::string& symbol : symbols){
+        std::string subscription = std::format("{{\"type\":\"subscribe\",\"symbol\":\"{}\"}}", symbol);
+
+        std::cout << subscription << std::endl;
+        ws.write(net::buffer(subscription));
+    }
 }
 
+void addTrade(std::deque<PriceVolume>& priceVolumes, const double& price, const double& volume){
+    if (priceVolumes.size() == PERIOD_MAX){
+        priceVolumes.pop_front();
+    }
 
-void handle_message(std::deque<PriceVolume>& prices, const std::string& message) {
+    priceVolumes.push_back(PriceVolume(price, volume));
+}
+
+void handleMessage(std::unordered_map<std::string, std::deque<PriceVolume>>& symbolMap, const std::string& message) {
     try {
         json parsed = json::parse(message);
 
@@ -59,11 +78,7 @@ void handle_message(std::deque<PriceVolume>& prices, const std::string& message)
                     double price = trade["p"];
                     int volume = trade["v"];
 
-                    if (prices.size() == PERIOD_MAX){
-                        prices.pop_front();
-                    }
-
-                    prices.push_back(PriceVolume(symbol, price, volume));
+                    addTrade(symbolMap[symbol], price, volume);
                 }
             }
         }
@@ -80,10 +95,27 @@ double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period) {
     return sum / period;
 }
 
+void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws){
+    beast::flat_buffer buffer;
+    std::string message;
+    std::unordered_map<std::string, std::deque<PriceVolume>> symbolMap;
+
+    while (true) {
+        ws.read(buffer);
+        message = beast::buffers_to_string(buffer.data());
+        handleMessage(symbolMap, message);
+
+        // Clear the buffer for the next message
+        buffer.consume(buffer.size());
+    }
+}
+
 int main() {
     try {
-        std::string token = load_api_token("config.yaml");
-
+        std::string token;
+        std::vector<std::string> symbols;
+        loadYAMLFile("config.yaml", token, symbols);
+        
         const std::string host = "ws.finnhub.io";
         const std::string port = "443";
         const std::string target = "/?token=" + token;
@@ -123,30 +155,11 @@ int main() {
         // Perform the WebSocket handshake
         ws.handshake(host, target);
 
-        send_subscriptions(ws);
+        sendSubscriptions(ws, symbols);
 
         // Run a separate thread to handle reading data
         std::thread read_thread([&]() {
-            beast::flat_buffer buffer;
-            std::string message;
-            std::deque<PriceVolume> priceVolumes;
-
-            while (true) {
-                ws.read(buffer);
-
-                message = beast::buffers_to_string(buffer.data());
-
-                handle_message(priceVolumes, message);
-
-                if (priceVolumes.size() == PERIOD_MAX){
-                    double sma = calculateSMA(priceVolumes, PERIOD_MAX);
-
-                    std::cout << "SMA: " << sma << std::endl;
-                }
-
-                // Clear the buffer for the next message
-                buffer.consume(buffer.size());
-            }
+            readThread(ws);
         });
 
         // Main thread stays alive and waits for the read thread to complete
