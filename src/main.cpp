@@ -27,6 +27,23 @@ typedef struct PriceVolume {
     PriceVolume(double p, double v) : price(p), volume(v) {};
 } PriceVolume;
 
+typedef struct Stock {
+    std::deque<PriceVolume> priceVolumes;
+    double EMA;
+
+    Stock() {
+        EMA = 0;
+    }
+} Stock;
+
+void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols);
+void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const std::vector<std::string>& symbols);
+void handleTrade(Stock& stock, const double& price, const double& volume);
+void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std::string& message);
+double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period);
+double updateEMA(double EMA, double price, int period);
+void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws);
+
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols){
     YAML::Node config = YAML::LoadFile(filePath);
 
@@ -45,24 +62,28 @@ void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<s
     }
 }
 
-void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, std::vector<std::string> symbols) {
-    for (std::string& symbol : symbols){
+void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const std::vector<std::string>& symbols){
+    for (const std::string& symbol : symbols){
         std::string subscription = std::format("{{\"type\":\"subscribe\",\"symbol\":\"{}\"}}", symbol);
-
-        std::cout << subscription << std::endl;
         ws.write(net::buffer(subscription));
     }
 }
 
-void addTrade(std::deque<PriceVolume>& priceVolumes, const double& price, const double& volume){
-    if (priceVolumes.size() == PERIOD_MAX){
-        priceVolumes.pop_front();
+void handleTrade(Stock& stock, const double& price, const double& volume){
+    if (stock.priceVolumes.size() == PERIOD_MAX){
+        if (stock.EMA == 0){
+            stock.EMA = calculateSMA(stock.priceVolumes, PERIOD_MAX);
+        }
+        else{
+            stock.EMA = updateEMA(stock.EMA, price, PERIOD_MAX);
+        }
+        stock.priceVolumes.pop_front();
     }
 
-    priceVolumes.push_back(PriceVolume(price, volume));
+    stock.priceVolumes.push_back(PriceVolume(price, volume));
 }
 
-void handleMessage(std::unordered_map<std::string, std::deque<PriceVolume>>& symbolMap, const std::string& message) {
+void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std::string& message){
     try {
         json parsed = json::parse(message);
 
@@ -78,7 +99,7 @@ void handleMessage(std::unordered_map<std::string, std::deque<PriceVolume>>& sym
                     double price = trade["p"];
                     int volume = trade["v"];
 
-                    addTrade(symbolMap[symbol], price, volume);
+                    handleTrade(symbolMap[symbol], price, volume);
                 }
             }
         }
@@ -87,7 +108,7 @@ void handleMessage(std::unordered_map<std::string, std::deque<PriceVolume>>& sym
     }
 }
 
-double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period) {
+double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period){
     double sum = 0.0;
     for (int i = 0; i < period; ++i) {
         sum += priceVolumes[i].price;
@@ -95,10 +116,15 @@ double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period) {
     return sum / period;
 }
 
+double updateEMA(double EMA, double price, int period){
+    double alpha = 2.0 / (period + 1);
+    return price * alpha + EMA * (1 - alpha);
+}
+
 void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws){
     beast::flat_buffer buffer;
     std::string message;
-    std::unordered_map<std::string, std::deque<PriceVolume>> symbolMap;
+    std::unordered_map<std::string, Stock> symbolMap;
 
     while (true) {
         ws.read(buffer);
@@ -143,7 +169,7 @@ int main() {
         net::connect(ws.next_layer().next_layer(), results.begin(), results.end());
 
         // SNI for the SSL handshake
-        if(!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str())) {
+        if(!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str())){
             throw beast::system_error(
                 beast::error_code(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()),
                 "Failed to set SNI Host Name");
@@ -158,7 +184,7 @@ int main() {
         sendSubscriptions(ws, symbols);
 
         // Run a separate thread to handle reading data
-        std::thread read_thread([&]() {
+        std::thread read_thread([&](){
             readThread(ws);
         });
 
