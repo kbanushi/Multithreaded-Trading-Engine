@@ -8,6 +8,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <deque>
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
@@ -15,6 +16,16 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 using json = nlohmann::json;
+
+#define PERIOD_MAX 100
+
+typedef struct PriceVolume {
+    std::string symbol;
+    double price;
+    double volume;
+
+    PriceVolume(std::string s, double p, double v) : symbol(s), price(p), volume(v) {};
+} PriceVolume;
 
 std::string load_api_token(const std::string& file_path) {
     YAML::Node config = YAML::LoadFile(file_path);
@@ -32,7 +43,7 @@ void send_subscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws) {
 }
 
 
-void handle_message(const std::string& message) {
+void handle_message(std::deque<PriceVolume>& prices, const std::string& message) {
     try {
         json parsed = json::parse(message);
 
@@ -47,13 +58,26 @@ void handle_message(const std::string& message) {
                     std::string symbol = trade["s"];
                     double price = trade["p"];
                     int volume = trade["v"];
-                    std::cout << "Symbol: " << symbol << ", Price: " << price << ", Volume: " << volume << std::endl;
+
+                    if (prices.size() == PERIOD_MAX){
+                        prices.pop_front();
+                    }
+
+                    prices.push_back(PriceVolume(symbol, price, volume));
                 }
             }
         }
     } catch (const json::parse_error& e) {
         std::cerr << "JSON Parse Error: " << e.what() << std::endl;
     }
+}
+
+double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period) {
+    double sum = 0.0;
+    for (int i = 0; i < period; ++i) {
+        sum += priceVolumes[i].price;
+    }
+    return sum / period;
 }
 
 int main() {
@@ -104,12 +128,21 @@ int main() {
         // Run a separate thread to handle reading data
         std::thread read_thread([&]() {
             beast::flat_buffer buffer;
+            std::string message;
+            std::deque<PriceVolume> priceVolumes;
+
             while (true) {
-                // Read a message into the buffer
                 ws.read(buffer);
 
-                // Print the message received
-                std::cout << beast::make_printable(buffer.data()) << std::endl;
+                message = beast::buffers_to_string(buffer.data());
+
+                handle_message(priceVolumes, message);
+
+                if (priceVolumes.size() == PERIOD_MAX){
+                    double sma = calculateSMA(priceVolumes, PERIOD_MAX);
+
+                    std::cout << "SMA: " << sma << std::endl;
+                }
 
                 // Clear the buffer for the next message
                 buffer.consume(buffer.size());
