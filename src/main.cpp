@@ -32,11 +32,13 @@ public:
     double value;
     double earnings;
     bool owned;
+    double priceBought;
 
     EMA(){
         value = 0;
         earnings = 0;
         owned = false;
+        priceBought = 0;
     }
 
     void calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period){
@@ -52,6 +54,27 @@ public:
         double prevEMA = value;
         double alpha = 2.0 / (period + 1);
         value = price * alpha + prevEMA * (1 - alpha);
+    }
+
+    void handleEMATrade(const std::deque<PriceVolume>& priceVolumes, double price, int period){
+        if (value == 0){
+            calculateSMA(priceVolumes, period);
+        }
+        else{
+            updateEMA(price, period);
+        }
+
+        if (price < value && !owned){ //Current price is below EMA -> buy a share
+            earnings -= price;
+            owned = true;
+            priceBought = price;
+        }
+        else if (price > value && owned){ //Sell share
+            earnings += price;
+            owned = false;
+        }
+
+        std::cout << "EMA profits: " << earnings << std::endl;
     }
 };
 
@@ -93,15 +116,10 @@ void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const st
 
 void handleTrade(Stock& stock, const double& price, const double& volume){
     if (stock.priceVolumes.size() == PERIOD_MAX){
-        if (stock.ema.value == 0){
-            stock.ema.calculateSMA(stock.priceVolumes, PERIOD_MAX);
-        }
-        else{
-            stock.ema.updateEMA(price, PERIOD_MAX);
-        }
+        stock.ema.handleEMATrade(stock.priceVolumes, price, PERIOD_MAX);
         stock.priceVolumes.pop_front();
 
-        std::cout << "stock EMA value: " << stock.ema.value << std::endl;
+        //std::cout << "stock EMA value: " << stock.ema.value << std::endl;
     }
 
     stock.priceVolumes.push_back(PriceVolume(price, volume));
