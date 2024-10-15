@@ -20,28 +20,50 @@ using json = nlohmann::json;
 
 #define PERIOD_MAX 100
 
-typedef struct PriceVolume {
+typedef struct PriceVolume{
     double price;
     double volume;
 
     PriceVolume(double p, double v) : price(p), volume(v) {};
 } PriceVolume;
 
-typedef struct Stock {
-    std::deque<PriceVolume> priceVolumes;
-    double EMA;
+class EMA{
+public:
+    double value;
+    double earnings;
+    bool owned;
 
-    Stock() {
-        EMA = 0;
+    EMA(){
+        value = 0;
+        earnings = 0;
+        owned = false;
     }
+
+    void calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period){
+        double sum = 0.0;
+        for (int i = 0; i < period; ++i) {
+            sum += priceVolumes[i].price;
+        }
+
+        value = sum / period;
+    }
+
+    void updateEMA(double price, int period){
+        double prevEMA = value;
+        double alpha = 2.0 / (period + 1);
+        value = price * alpha + prevEMA * (1 - alpha);
+    }
+};
+
+typedef struct Stock{
+    std::deque<PriceVolume> priceVolumes;
+    EMA ema;
 } Stock;
 
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols);
 void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const std::vector<std::string>& symbols);
 void handleTrade(Stock& stock, const double& price, const double& volume);
 void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std::string& message);
-double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period);
-double updateEMA(double EMA, double price, int period);
 void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws);
 
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols){
@@ -71,13 +93,15 @@ void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const st
 
 void handleTrade(Stock& stock, const double& price, const double& volume){
     if (stock.priceVolumes.size() == PERIOD_MAX){
-        if (stock.EMA == 0){
-            stock.EMA = calculateSMA(stock.priceVolumes, PERIOD_MAX);
+        if (stock.ema.value == 0){
+            stock.ema.calculateSMA(stock.priceVolumes, PERIOD_MAX);
         }
         else{
-            stock.EMA = updateEMA(stock.EMA, price, PERIOD_MAX);
+            stock.ema.updateEMA(price, PERIOD_MAX);
         }
         stock.priceVolumes.pop_front();
+
+        std::cout << "stock EMA value: " << stock.ema.value << std::endl;
     }
 
     stock.priceVolumes.push_back(PriceVolume(price, volume));
@@ -106,19 +130,6 @@ void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std:
     } catch (const json::parse_error& e) {
         std::cerr << "JSON Parse Error: " << e.what() << std::endl;
     }
-}
-
-double calculateSMA(const std::deque<PriceVolume>& priceVolumes, int period){
-    double sum = 0.0;
-    for (int i = 0; i < period; ++i) {
-        sum += priceVolumes[i].price;
-    }
-    return sum / period;
-}
-
-double updateEMA(double EMA, double price, int period){
-    double alpha = 2.0 / (period + 1);
-    return price * alpha + EMA * (1 - alpha);
 }
 
 void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws){
