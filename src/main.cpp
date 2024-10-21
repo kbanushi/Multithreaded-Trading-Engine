@@ -18,6 +18,8 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 using json = nlohmann::json;
 
+boost::asio::thread_pool pool(4);
+
 #define PERIOD_MAX 100
 
 typedef struct PriceVolume{
@@ -74,8 +76,10 @@ public:
             earnings += price;
             holdingStock = false;
         }
+    }
 
-        //std::cout << "EMA profits: " << earnings << std::endl;
+    double getEarnings(){
+        return earnings;
     }
 };
 
@@ -98,7 +102,6 @@ class MomentumTrade{
             int currIndex = priceVolumes.size() - 1;
 
             //Note deque structure where newest values are pushed to the back and old values are popped from front
-
             double priceThen = priceVolumes[currIndex - period].price;
             double priceNow = priceVolumes[currIndex].price;
 
@@ -120,12 +123,17 @@ class MomentumTrade{
 
             std::cout << "Momentum profits: " << earnings << std::endl;
         }
+
+        double getEarnings(){
+            return earnings;
+        }
 };
 
 typedef struct Stock{
     std::deque<PriceVolume> priceVolumes;
     EMATrade emaTrade;
     MomentumTrade momentumTrade;
+    std::mutex mtx;
 } Stock;
 
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols);
@@ -133,6 +141,13 @@ void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const st
 void handleTrade(Stock& stock, const double& price, const double& volume);
 void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std::string& message);
 void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws);
+
+void handleTradeAsync(Stock& stock, const double& price, const double& volume) {
+    boost::asio::post(pool, [&]() {
+        std::lock_guard<std::mutex> lock(stock.mtx);
+        handleTrade(stock, price, volume);
+    });
+}
 
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols){
     YAML::Node config = YAML::LoadFile(filePath);
@@ -188,7 +203,11 @@ void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std:
                     double price = trade["p"];
                     int volume = trade["v"];
 
-                    handleTrade(symbolMap[symbol], price, volume);
+                    handleTradeAsync(symbolMap[symbol], price, volume);
+
+                    std::cout << "Current standing for stock: " << symbol << std::endl;
+                    std::cout << "EMA Trading profits: " << symbolMap[symbol].emaTrade.getEarnings() << std::endl;
+                    std::cout << "Momenum Trading profits: " << symbolMap[symbol].momentumTrade.getEarnings() << std::endl;
                 }
             }
         }
@@ -206,8 +225,6 @@ void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws){
         ws.read(buffer);
         message = beast::buffers_to_string(buffer.data());
         handleMessage(symbolMap, message);
-
-        // Clear the buffer for the next message
         buffer.consume(buffer.size());
     }
 }
@@ -260,7 +277,7 @@ int main() {
         sendSubscriptions(ws, symbols);
 
         // Run a separate thread to handle reading data
-        std::thread read_thread([&](){
+        std::thread read_thread([&ws](){
             readThread(ws);
         });
 
