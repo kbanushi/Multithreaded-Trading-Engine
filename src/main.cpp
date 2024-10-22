@@ -10,6 +10,7 @@
 #include <thread>
 #include <deque>
 #include <unordered_map>
+#include <queue>
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
@@ -17,8 +18,6 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 using json = nlohmann::json;
-
-boost::asio::thread_pool pool(4);
 
 #define PERIOD_MAX 100
 
@@ -134,6 +133,9 @@ typedef struct Stock{
     EMATrade emaTrade;
     MomentumTrade momentumTrade;
     std::mutex mtx;
+    std::queue<std::function<void()>> taskQueue;
+    std::condition_variable cv;
+    std::atomic<bool> stopFlag = false;
 } Stock;
 
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols);
@@ -142,11 +144,30 @@ void handleTrade(Stock& stock, const double& price, const double& volume);
 void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std::string& message);
 void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws);
 
-void handleTradeAsync(Stock& stock, const double& price, const double& volume) {
-    boost::asio::post(pool, [&]() {
+void stockThreadWorker(Stock& stock) {
+    while (!stock.stopFlag) {
+        std::unique_lock<std::mutex> lock(stock.mtx);
+
+        // Wait for a task to be added to the queue or stop signal
+        stock.cv.wait(lock, [&stock] { return !stock.taskQueue.empty() || stock.stopFlag; });
+
+        // Process tasks in the queue
+        while (!stock.taskQueue.empty()) {
+            auto task = std::move(stock.taskQueue.front());
+            stock.taskQueue.pop();
+            lock.unlock();
+            task();  //handleTrade(...)
+            lock.lock();
+        }
+    }
+}
+
+void postTaskToStock(Stock& stock, std::function<void()> task) {
+    {
         std::lock_guard<std::mutex> lock(stock.mtx);
-        handleTrade(stock, price, volume);
-    });
+        stock.taskQueue.push(task);
+    }
+    stock.cv.notify_one();  // Notify the thread there’s a new task
 }
 
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols){
@@ -203,7 +224,17 @@ void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std:
                     double price = trade["p"];
                     int volume = trade["v"];
 
-                    handleTradeAsync(symbolMap[symbol], price, volume);
+                    if (!symbolMap.count(symbol)){
+                        std::thread stock_thread([&](){
+                            stockThreadWorker(symbolMap[symbol]);
+                        });
+
+                        stock_thread.detach();
+                    }
+
+                    postTaskToStock(symbolMap[symbol], [&]{
+                        handleTrade(symbolMap[symbol], price, volume);
+                    });
 
                     std::cout << "Current standing for stock: " << symbol << std::endl;
                     std::cout << "EMA Trading profits: " << symbolMap[symbol].emaTrade.getEarnings() << std::endl;
