@@ -21,6 +21,8 @@ using json = nlohmann::json;
 
 #define PERIOD_MAX 100
 
+std::mutex printMtx;
+
 typedef struct PriceVolume{
     double price;
     double volume;
@@ -77,7 +79,7 @@ public:
         }
     }
 
-    double getEarnings(){
+    double getEarnings() const {
         return earnings;
     }
 };
@@ -119,11 +121,9 @@ class MomentumTrade{
                 earnings += price;
                 holdingStock = false;
             }
-
-            std::cout << "Momentum profits: " << earnings << std::endl;
         }
 
-        double getEarnings(){
+        double getEarnings() const {
             return earnings;
         }
 };
@@ -140,13 +140,13 @@ typedef struct Stock{
 
 void loadYAMLFile(const std::string& filePath, std::string& token, std::vector<std::string>& symbols);
 void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const std::vector<std::string>& symbols);
-void handleTrade(Stock& stock, const double& price, const double& volume);
+void handleTrade(const std::string& symbol, Stock& stock, const double& price, const double& volume);
 void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std::string& message);
 void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws);
 
 void stockThreadWorker(Stock& stock) {
     while (!stock.stopFlag) {
-        std::unique_lock<std::mutex> lock(stock.mtx);
+        std::lock_guard<std::mutex> lock(stock.mtx);
 
         // Wait for a task to be added to the queue or stop signal
         stock.cv.wait(lock, [&stock] { return !stock.taskQueue.empty() || stock.stopFlag; });
@@ -195,10 +195,20 @@ void sendSubscriptions(websocket::stream<ssl::stream<tcp::socket>>& ws, const st
     }
 }
 
-void handleTrade(Stock& stock, const double& price, const double& volume){
+void printStandings(const std::string& symbol, const Stock& stock){
+    std::lock_guard<std::mutex> lock(printMtx);
+
+    std::cout << "Current standing for stock: " << symbol << std::endl;
+    std::cout << "EMA Trading profits: " << stock.emaTrade.getEarnings() << std::endl;
+    std::cout << "Momenum Trading profits: " << stock.momentumTrade.getEarnings() << std::endl;
+}
+
+void handleTrade(const std::string& symbol, Stock& stock, const double& price, const double& volume){
     if (stock.priceVolumes.size() > PERIOD_MAX){
         stock.emaTrade.evaluateTrade(stock.priceVolumes, price, PERIOD_MAX);
         stock.momentumTrade.evaluateTrade(stock.priceVolumes, price, 0, PERIOD_MAX);
+
+        printStandings(symbol, stock);
     }
 
     if (stock.priceVolumes.size() == 3 * PERIOD_MAX){
@@ -224,21 +234,18 @@ void handleMessage(std::unordered_map<std::string, Stock>& symbolMap, const std:
                     double price = trade["p"];
                     int volume = trade["v"];
 
+                    // Stock has not been seen yet, therefore create thread to support stock operations
                     if (!symbolMap.count(symbol)){
-                        std::thread stock_thread([&](){
+                        std::thread stock_thread([&]{
                             stockThreadWorker(symbolMap[symbol]);
                         });
 
-                        stock_thread.detach();
+                        stock_thread.detach(); // Do not wait for thread to complete
                     }
 
                     postTaskToStock(symbolMap[symbol], [&]{
-                        handleTrade(symbolMap[symbol], price, volume);
+                        handleTrade(symbol, symbolMap[symbol], price, volume);
                     });
-
-                    std::cout << "Current standing for stock: " << symbol << std::endl;
-                    std::cout << "EMA Trading profits: " << symbolMap[symbol].emaTrade.getEarnings() << std::endl;
-                    std::cout << "Momenum Trading profits: " << symbolMap[symbol].momentumTrade.getEarnings() << std::endl;
                 }
             }
         }
