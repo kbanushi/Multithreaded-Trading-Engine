@@ -146,7 +146,7 @@ void readThread(websocket::stream<ssl::stream<tcp::socket>>& ws);
 
 void stockThreadWorker(Stock& stock) {
     while (!stock.stopFlag) {
-        std::lock_guard<std::mutex> lock(stock.mtx);
+        std::unique_lock<std::mutex> lock(stock.mtx);
 
         // Wait for a task to be added to the queue or stop signal
         stock.cv.wait(lock, [&stock] { return !stock.taskQueue.empty() || stock.stopFlag; });
